@@ -1,4 +1,4 @@
-Okay, here is a step-by-step guide to install and configure the media stack using the refined Docker Compose script on your DietPi system.
+Step-by-step guide to install and configure the media stack using the refined Docker Compose script on your DietPi system.
 
 Phase 1: Preparation on DietPi Host
 
