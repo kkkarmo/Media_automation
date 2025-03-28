@@ -1,0 +1,169 @@
+version: '3.8'
+
+# Media management stack with Prowlarr, Sonarr, Radarr, and Transmission over Tor
+# Combines robustness features (healthchecks, pinned versions, resource limits)
+# with reliable/secure Tor configuration practices.
+
+services:
+  tor-proxy: # Renamed for clarity, matches depends_on and secrets usage
+    image: dperson/torproxy:latest # Using latest is common for torproxy, pin if preferred
+    container_name: tor-proxy
+    # Port 9050 is NOT exposed externally - only needed internally by transmission
+    environment:
+      - TZ=America/New_York # Adjust to your timezone
+      - DNS_SERVER=1.1.1.1,1.0.0.1 # Use external DNS to prevent leaks (Recommended)
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "9050"] # Check if SOCKS port is listening
+      interval: 1m
+      timeout: 10s
+      retries: 3
+      start_period: 30s # Give Tor time to bootstrap
+    deploy:
+      resources:
+        limits:
+          memory: 256M # Adjust based on observed usage
+    networks:
+      - media-network
+
+  prowlarr:
+    image: lscr.io/linuxserver/prowlarr:1.10.5 # Pinned version
+    container_name: prowlarr
+    environment:
+      - PUID=1000 # Adjust to your user's ID
+      - PGID=1000 # Adjust to your user's group ID
+      - TZ=America/New_York # Adjust to your timezone
+    volumes:
+      - ./config/prowlarr:/config
+    ports:
+      - 9696:9696
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9696/"] # Added trailing slash often needed
+      interval: 1m
+      timeout: 10s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 512M # Adjust based on observed usage
+    restart: unless-stopped
+    networks:
+      - media-network
+
+  sonarr:
+    image: lscr.io/linuxserver/sonarr:4.0.0 # Pinned version
+    container_name: sonarr
+    environment:
+      - PUID=1000 # Adjust to your user's ID
+      - PGID=1000 # Adjust to your user's group ID
+      - TZ=America/New_York # Adjust to your timezone
+    volumes:
+      - ./config/sonarr:/config
+      - ./media/tv:/tv # Host path for TV library
+      - ./downloads:/downloads # Consistent host path for all downloads
+    ports:
+      - 8989:8989
+    depends_on:
+      prowlarr:
+        condition: service_healthy
+      transmission: # Wait for transmission to be healthy too
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8989/"] # Added trailing slash often needed
+      interval: 1m
+      timeout: 10s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 1G # Adjust based on library size/activity
+    restart: unless-stopped
+    networks:
+      - media-network
+
+  radarr:
+    image: lscr.io/linuxserver/radarr:5.0.0 # Pinned version
+    container_name: radarr
+    environment:
+      - PUID=1000 # Adjust to your user's ID
+      - PGID=1000 # Adjust to your user's group ID
+      - TZ=America/New_York # Adjust to your timezone
+    volumes:
+      - ./config/radarr:/config
+      - ./media/movies:/movies # Host path for Movie library
+      - ./downloads:/downloads # Consistent host path for all downloads
+    ports:
+      - 7878:7878
+    depends_on:
+      prowlarr:
+        condition: service_healthy
+      transmission: # Wait for transmission to be healthy too
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7878/"] # Added trailing slash often needed
+      interval: 1m
+      timeout: 10s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 1G # Adjust based on library size/activity
+    restart: unless-stopped
+    networks:
+      - media-network
+
+  transmission:
+    image: lscr.io/linuxserver/transmission:4.0.5 # Pinned version
+    container_name: transmission
+    environment:
+      - PUID=1000 # Adjust to your user's ID
+      - PGID=1000 # Adjust to your user's group ID
+      - TZ=America/New_York # Adjust to your timezone
+      # !!! PROXY IS NOT SET VIA ENV VARS !!!
+      # Proxy MUST be configured MANUALLY in Transmission Web UI settings:
+      # Host: tor-proxy, Port: 9050, Type: SOCKS5, Check "Use proxy for peer connections"
+      # ALSO: Disable DHT, LPD, PEX in Transmission settings for privacy over Tor.
+    secrets: # Use Docker secrets for credentials
+      - source: transmission_user
+        target: transmission_user # Target file inside container
+      - source: transmission_pass
+        target: transmission_pass # Target file inside container
+    # Environment variables to tell Transmission *where* to read the secrets from:
+    environment:
+      - USER_FILE=/run/secrets/transmission_user
+      - PASSWORD_FILE=/run/secrets/transmission_pass
+    volumes:
+      - ./config/transmission:/config
+      - ./downloads:/downloads # Consistent host path for all downloads
+    ports:
+      # Web UI ONLY exposed on the host machine (localhost) for security
+      - "127.0.0.1:9091:9091"
+      # Direct P2P ports (51413) are NOT exposed - traffic goes via Tor proxy.
+    depends_on:
+      tor-proxy:
+        condition: service_healthy # Wait for Tor proxy to be ready
+    healthcheck:
+      # Basic check - doesn't verify authentication or full functionality
+      test: ["CMD", "curl", "-f", "http://localhost:9091/transmission/web/"]
+      interval: 1m
+      timeout: 10s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 512M # Adjust based on observed usage
+    restart: unless-stopped
+    networks:
+      - media-network
+
+# Define the custom network
+networks:
+  media-network:
+    name: media-network
+
+# Define secrets - point to files containing the actual credentials
+secrets:
+  transmission_user:
+    file: ./secrets/transmission_user.txt # File contains only the username (e.g., admin)
+  transmission_pass:
+    file: ./secrets/transmission_pass.txt # File contains only the password
